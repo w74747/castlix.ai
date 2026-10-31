@@ -1,12 +1,13 @@
 """
-bot.py — بوت Castlix Advisory على تليجرام (نسخة PostgreSQL و Redis المتكاملة).
+bot.py — بوت Castlix Advisory على تليجرام (النسخة الاستشارية والمؤسسية المحدثة).
 
-الميزات المحدثة:
-  * تهيئة تلقائية لجداول PostgreSQL عند الإقلاع.
-  * إدارة أقفال الجلسات والمهام الثقيلة عبر Redis (مع دعم التراجع التلقائي).
-  * حفظ تفاصيل المشاريع ومؤشراتها المالية ومسح السوق في جدول projects.
-  * حفظ الفواتير وعروض الأسعار الرسمية في جدول invoices.
-  * استمرارية تامة وأمان Fail-Closed مع معالجة غير حاجبة.
+الميزات المدمجة:
+  * واجهة ترحيبية رصينة بأسلوب بيوت الخبرة والاستشارات العالمية.
+  * منسق حوار ذكي (ChatOrchestrator) يفهم اللهجات ويدعم التبديل التلقائي بين النماذج (Auto-Failover).
+  * تكامل دائم مع PostgreSQL لحفظ المشاريع، الفواتير، وسجلات التكاليف.
+  * إدارة الجلسات والأقفال التشغيلية اللحظية عبر Redis.
+  * توليد عروض أسعار وفواتير رسمية بصيغة PDF بالهوية المعتمدة عبر أمر /invoice.
+  * أمان صارم (Fail-Closed) ومعالجة غير حاجبة (Non-blocking Tasks).
 """
 import asyncio
 import logging
@@ -58,6 +59,7 @@ logger = logging.getLogger("CastlixEngine")
     INVOICE_DETAILS,
 ) = range(9)
 
+# حماية مشددة: النظام يفشل مغلقاً تلقائياً
 AUTH = filters.User(user_id=list(config.ALLOWED_USER_IDS))
 TEXT = filters.TEXT & ~filters.COMMAND & AUTH
 YES = ("نعم", "yes", "y", "ok", "تأكيد", "ابدأ", "توكل على الله", "تمام")
@@ -84,7 +86,9 @@ async def finish_tracker(app: Application, tracker: CostTracker) -> None:
     await admin_notify(app, tracker.report_html())
 
 
-# ----------------------------------------------------------------------------- بوابات الدخول والأمان
+# -----------------------------------------------------------------------------
+# بوابات التحقق وإدارة الجلسات
+# -----------------------------------------------------------------------------
 async def deny(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     uid = update.effective_user.id if update.effective_user else "?"
     if update.effective_message:
@@ -106,7 +110,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     ]
     await update.message.reply_text(
         "🏛 <b>Castlix Advisory — القلعة الرقمية للاستشارات</b>\n"
-        "أهلاً بك. أنا مستشارك الاستثماري والمالي. اختر مسار العمل المطلوب:",
+        "أهلاً بك. أنا مستشارك الاستثماري والمالي. يرجى اختيار مسار العمل المطلوب:",
         reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True),
         parse_mode="HTML"
     )
@@ -118,10 +122,10 @@ async def choose_track(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     if "مشروع جديد" in choice:
         context.user_data["service_type"] = "NEW_PROJECT"
         await update.message.reply_text(
-            "🚀 <b>مرحباً بك في مسار دراسة الجدوى الاستثمارية</b>\n\n"
-            "تحدث معي بأريحية وبأي لهجة تفضلها؛ اكتب فكرة مشروعك، وأين تخطط للتأسيس، "
-            "ورأس المال التقريبي إن وجد (أو اطلب مني تقديره).\n\n"
-            "👈 <i>أخبرني، ما هو المشروع الذي تفكر في إطلاقه؟</i>",
+            "🚀 <b>مسار دراسة الجدوى الاستثمارية والنمذجة المالية</b>\n\n"
+            "أهلاً بك. يرجى تزويدي بفكرة المشروع، النطاق الجغرافي المستهدف، "
+            "ورأس المال المبدئي المقترح (أو توضيح رغبتك في تقديره آلياً بحسب مؤشرات السوق).\n\n"
+            "👈 <i>ما هو النشاط الاستثماري المقترح؟</i>",
             reply_markup=ReplyKeyboardRemove(),
             parse_mode="HTML"
         )
@@ -130,9 +134,9 @@ async def choose_track(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     if "شركة قائمة" in choice:
         context.user_data["service_type"] = "EXISTING_BUSINESS"
         await update.message.reply_text(
-            "📈 <b>التشخيص المالي والتنافسي</b>\n\n"
-            "⚠️ هذا المسار قيد التطوير: نقوم باستلام بياناتك وقوائمك المالية بأمان لحفظ الطلب ودراسته.\n\n"
-            "👈 <b>ما اسم شركتك وفي أي دولة ونشاط تعمل؟</b>",
+            "📈 <b>التشخيص المالي والتنافسي للمنشآت القائمة</b>\n\n"
+            "⚠️ هذا المسار قيد التطوير: نقوم باستلام بياناتك وقوائمك المالية بأمان لحفظ الطلب وفحصه.\n\n"
+            "👈 <b>ما اسم الشركة وفي أي قطاع ودولة تعمل؟</b>",
             reply_markup=ReplyKeyboardRemove(),
             parse_mode="HTML"
         )
@@ -145,7 +149,9 @@ async def choose_track(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     return CHOOSE_TRACK
 
 
-# ----------------------------------------------------------------------------- الحوار الاستشاري البشري
+# -----------------------------------------------------------------------------
+# طبقة الحوار الاستشاري الذكي
+# -----------------------------------------------------------------------------
 async def consultative_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_msg = update.message.text.strip()
     tracker = CostTracker("AI_INTAKE", update.effective_user.id)
@@ -164,7 +170,6 @@ async def consultative_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if intake.capital:
         context.user_data["capital"] = intake.capital
 
-    # حفظ حالة الجلسة مؤقتاً في Redis
     cache.set_session(update.effective_user.id, context.user_data)
 
     if intake.is_ready_for_pipeline and context.user_data.get("project_idea") and context.user_data.get("location"):
@@ -172,11 +177,11 @@ async def consultative_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         capital_disp = d.get("capital") or "تقدير آلي حسب معايير السوق"
         await update.message.reply_text(
             f"{esc(intake.conversational_reply)}\n\n"
-            "🏛 <b>الملخص الاستثماري المستخلص:</b>\n"
+            "🏛 <b>نطاق الدراسة المعتمد مبدئياً:</b>\n"
             f"• <b>المشروع:</b> {esc(d['project_idea'])}\n"
-            f"• <b>الموقع:</b> {esc(d['location'])}\n"
+            f"• <b>الموقع الجغرافي:</b> {esc(d['location'])}\n"
             f"• <b>رأس المال:</b> {esc(capital_disp)}\n\n"
-            "هل ترغب في إطلاق محرك دراسة الجدوى والنمذجة المالية الآن؟ (نعم / تعديل)",
+            "هل ترغب في إطلاق محرك أبحاث السوق والنمذجة المالية الآن؟ (نعم / تعديل)",
             parse_mode="HTML"
         )
         return NEW_CONFIRM
@@ -188,26 +193,25 @@ async def consultative_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 async def new_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if not is_yes(update.message.text):
         await update.message.reply_text(
-            "تمام، أخبرني بالتعديلات أو التفاصيل الإضافية التي ترغب في توضيحها:",
+            "حسناً، تفضل بتوضيح التعديلات أو أي تفاصيل إضافية ترغب في تعديلها:",
             reply_markup=ReplyKeyboardRemove()
         )
         return NEW_CONSULTATIVE_CHAT
 
     uid = update.effective_user.id
     
-    # محاولة اكتساب قفل تنفيذي عبر Redis
     if not cache.acquire_lock(uid, timeout_seconds=300):
-        await update.message.reply_text("⏳ لديك دراسة قيد الإعداد بالفعل. انتظر اكتمالها.")
+        await update.message.reply_text("⏳ لديك دراسة قيد الإعداد والمعالجة بالفعل. يرجى الانتظار حتى اكتمالها.")
         return ConversationHandler.END
 
-    await update.message.reply_text("⏳ بدأ محرك Castlix العمل في الخلفية. سأرسل لك المخرجات مرحلياً فور جاهزيتها.")
+    await update.message.reply_text("⏳ بدأ محرك Castlix العمل والتحليل في الخلفية. ستصلك المخرجات مرحلياً فور جاهزيتها.")
     data = dict(context.user_data)
     context.application.create_task(run_new_project(context.application, update.effective_chat.id, uid, data))
     return ConversationHandler.END
 
 
 async def run_new_project(app: Application, chat_id: int, user_id: int, data: Dict[str, Any]) -> None:
-    """المسار الكامل لتحليل السوق وبناء الإكسيل والشرائح وحفظ النتائج في PostgreSQL."""
+    """معالجة غير حاجبة لمسح السوق والنمذجة المالية وحفظ السجلات في PostgreSQL."""
     tracker = CostTracker("NEW_FEASIBILITY", user_id)
     bot = app.bot
     market_html = ""
@@ -216,9 +220,9 @@ async def run_new_project(app: Application, chat_id: int, user_id: int, data: Di
     project_status = "completed"
 
     try:
-        # 1. مسح السوق (Tavily)
+        # 1. أبحاث ومسح السوق
         if config.TAVILY_API_KEY:
-            await safe_send(bot, chat_id, "🔎 جاري مسح المشهد التنافسي ومؤشرات السوق...")
+            await safe_send(bot, chat_id, "🔎 جاري مسح المشهد التنافسي ومؤشرات السوق المستهدف...")
             try:
                 agent = MarketResearchAgent()
                 market = await asyncio.to_thread(agent.conduct_research, data["project_idea"], data["location"], tracker)
@@ -228,12 +232,12 @@ async def run_new_project(app: Application, chat_id: int, user_id: int, data: Di
             except Exception as exc:
                 logger.exception("market failure")
                 tracker.stage("market", f"failed: {type(exc).__name__}")
-                await safe_send(bot, chat_id, "⚠️ تعذّر مسح السوق؛ جاري الانتقال للنموذج المالي.")
+                await safe_send(bot, chat_id, "⚠️ تعذّر استكمال مسح السوق آلياً؛ جاري الانتقال للنموذج المالي.")
         else:
             tracker.stage("market", "skipped: TAVILY_API_KEY")
 
-        # 2. النموذج المالي التفاعلي (openpyxl + finance_core)
-        await safe_send(bot, chat_id, "📐 جاري بناء النموذج المالي والسيناريوهات الحسابية...")
+        # 2. بناء النموذج المالي التفاعلي
+        await safe_send(bot, chat_id, "📐 جاري بناء النموذج المالي التفاعلي وهيكلة القوائم والسيناريوهات...")
         try:
             fin = await asyncio.to_thread(
                 FinancialModelingAgent().generate_financial_model,
@@ -251,11 +255,11 @@ async def run_new_project(app: Application, chat_id: int, user_id: int, data: Di
             payback = "أكثر من 5 سنوات" if m["payback"] is None else f"{m['payback']:.1f} سنة"
             irr_txt = "غير متاح" if m["irr_tv"] is None else f"{m['irr_tv']:.1%}"
             caption = (
-                f"🏛 النموذج المالي لـ {data['project_idea']}\n"
-                f"• NPV (بدون قيمة نهائية): ${m['npv_explicit']:,.0f}\n"
-                f"• IRR (شاملاً القيمة النهائية): {irr_txt}\n"
-                f"• فترة الاسترداد: {payback}\n"
-                f"• حالة الفرضيات: {fin.undocumented}/{fin.total_assumptions} غير موثقة (Low)"
+                f"🏛 النموذج المالي التفاعلي: {data['project_idea']}\n"
+                f"• صافي القيمة الحالية (NPV): ${m['npv_explicit']:,.0f}\n"
+                f"• معدل العائد الداخلي (IRR): {irr_txt}\n"
+                f"• فترة الاسترداد المتوقعة: {payback}\n"
+                f"• التدقيق على الفرضيات: {fin.undocumented}/{fin.total_assumptions} غير موثقة"
             )
             await bot.send_document(chat_id=chat_id, document=buf, caption=caption[:1000])
             for w in fin.warnings:
@@ -264,11 +268,11 @@ async def run_new_project(app: Application, chat_id: int, user_id: int, data: Di
             logger.exception("finance error")
             tracker.stage("finance", f"failed: {type(exc).__name__}")
             project_status = "failed"
-            await safe_send(bot, chat_id, "❌ تعذّر بناء النموذج المالي. تم إشعار الإدارة.")
+            await safe_send(bot, chat_id, "❌ تعذّر بناء النموذج المالي. تم إشعار الإدارة الفنية.")
 
-        # 3. العرض التقديمي (Gamma API v1.0)
+        # 3. العرض الاستثماري للشركاء (Pitch Deck)
         if fin and config.GAMMA_API_KEY:
-            await safe_send(bot, chat_id, "🎨 جاري إعداد العرض الاستثماري للشركاء...")
+            await safe_send(bot, chat_id, "🎨 جاري إعداد العرض الاستثماري التنفيذي للشركاء...")
             try:
                 deck = await asyncio.to_thread(
                     PresentationAgent().generate_pitch_deck,
@@ -285,7 +289,7 @@ async def run_new_project(app: Application, chat_id: int, user_id: int, data: Di
                     deck_url = deck.get("url")
                     tracker.stage("presentation", "ok")
                     extra = f"\n📥 تصدير: {esc(deck['export_url'])}" if deck.get("export_url") else ""
-                    await safe_send(bot, chat_id, f"🎯 العرض الاستثماري جاهز:\n{esc(deck_url)}{extra}")
+                    await safe_send(bot, chat_id, f"🎯 العرض الاستثماري مكتمل وجاهز:\n{esc(deck_url)}{extra}")
                 else:
                     tracker.stage("presentation", "failed")
                     await safe_send(bot, chat_id, "⚠️ لم يكتمل بناء العرض التقديمي.")
@@ -295,7 +299,7 @@ async def run_new_project(app: Application, chat_id: int, user_id: int, data: Di
         else:
             tracker.stage("presentation", "skipped")
 
-        # 4. حفظ سجل المشروع في PostgreSQL
+        # 4. توثيق وحفظ سجل المشروع في PostgreSQL
         if SessionLocal:
             db = None
             try:
@@ -313,7 +317,7 @@ async def run_new_project(app: Application, chat_id: int, user_id: int, data: Di
                 )
                 db.add(p_record)
                 db.commit()
-                logger.info("تم حفظ بيانات دراسة الجدوى في جدول projects بـ PostgreSQL.")
+                logger.info("تم حفظ المشروع ومؤشراته في جدول projects بـ PostgreSQL.")
             except Exception as exc:
                 logger.error(f"فشل حفظ المشروع في قاعدة البيانات: {exc}")
                 if db:
@@ -322,19 +326,21 @@ async def run_new_project(app: Application, chat_id: int, user_id: int, data: Di
                 if db:
                     db.close()
 
-        await safe_send(bot, chat_id, "✅ اكتملت مخرجات الدراسة الاستثمارية الأولية بنجاح.")
+        await safe_send(bot, chat_id, "✅ اكتملت مخرجات الدراسة الاستثمارية والنمذجة المالية بنجاح.")
     finally:
         cache.release_lock(user_id)
         await finish_tracker(app, tracker)
 
 
-# ----------------------------------------------------------------------------- مسار الفواتير وعروض الأسعار
+# -----------------------------------------------------------------------------
+# مسار الفواتير وعروض الأسعار الرسمية (PDF)
+# -----------------------------------------------------------------------------
 async def start_invoice_flow(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text(
-        "📄 <b>إنشاء عرض سعر أو فاتورة رسمية (PDF)</b>\n\n"
-        "أرسل البيانات بالصيغة التالية (أو اكتبها في سطر واحد):\n"
-        "<code>نوع الوثيقة (فاتورة / عرض سعر) | اسم العميل | اسم الشركة | المبلغ | العملة</code>\n\n"
-        "<i>مثال:</i>\n"
+        "📄 <b>إصدار عرض سعر أو فاتورة رسمية (PDF)</b>\n\n"
+        "يرجى إرسال تفاصيل الوثيقة بصيغة مفصولة بعلامة (|) كالتالي:\n"
+        "<code>نوع الوثيقة (فاتورة / عرض سعر) | اسم العميل | المؤسسة أو الشركة | القيمة | العملة</code>\n\n"
+        "<i>مثال تطبيقي:</i>\n"
         "<code>عرض سعر | سالم الحارثي | الخليج للتطوير | 1200 | OMR</code>",
         reply_markup=ReplyKeyboardRemove(),
         parse_mode="HTML"
@@ -348,7 +354,7 @@ async def handle_invoice_details(update: Update, context: ContextTypes.DEFAULT_T
     
     if len(parts) < 4:
         await update.message.reply_text(
-            "⚠️ يرجى التأكد من كتابة الحقول مفصولة بعلامة (|).\nمثال: عرض سعر | سالم الحارثي | الخليج للتطوير | 1200 | OMR"
+            "⚠️ التنسيق غير مكتمل. يرجى إرسال الحقول مفصولة بعلامة (|).\nمثال: عرض سعر | سالم الحارثي | الخليج للتطوير | 1200 | OMR"
         )
         return INVOICE_DETAILS
 
@@ -380,10 +386,9 @@ async def handle_invoice_details(update: Update, context: ContextTypes.DEFAULT_T
         client_org=client_org,
         items=items,
         currency=currency,
-        notes="الدفع مستحق خلال 14 يوماً من تاريخ الإصدار عبر التحويل البنكي المباشر."
+        notes="الدفع مستحق خلال 14 يوماً من تاريخ الإصدار عبر التحويل البنكي المعتمد."
     )
 
-    # حفظ سجل الفاتورة في جدول invoices بـ PostgreSQL
     if SessionLocal:
         db = None
         try:
@@ -399,7 +404,7 @@ async def handle_invoice_details(update: Update, context: ContextTypes.DEFAULT_T
             )
             db.add(inv_record)
             db.commit()
-            logger.info("تم حفظ الفاتورة في جدول invoices بـ PostgreSQL.")
+            logger.info("تم توثيق الفاتورة في جدول invoices بـ PostgreSQL.")
         except Exception as exc:
             logger.error(f"فشل حفظ الفاتورة في قاعدة البيانات: {exc}")
             if db:
@@ -411,27 +416,29 @@ async def handle_invoice_details(update: Update, context: ContextTypes.DEFAULT_T
     buf = BytesIO(pdf_bytes)
     buf.name = f"{doc_type}_{doc_number}.pdf"
     
-    caption = f"📄 <b>تم إصدار الوثيقة الرسمية</b>\n• النوع: {doc_type}\n• الرقم: #{doc_number}\n• العميل: {client_name}"
+    caption = f"📄 <b>تم إصدار الوثيقة بنجاح</b>\n• النوع: {doc_type}\n• الرقم المرجعي: #{doc_number}\n• العميل: {client_name}"
     await update.message.reply_document(document=buf, caption=caption, parse_mode="HTML")
     return ConversationHandler.END
 
 
-# ----------------------------------------------------------------------------- مسار الشركات القائمة
+# -----------------------------------------------------------------------------
+# مسار تشخيص وفحص الشركات القائمة
+# -----------------------------------------------------------------------------
 async def existing_company_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data["company_name"] = update.message.text.strip()[:200]
-    await update.message.reply_text("📌 <b>ما القطاع ونموذج العمل؟</b>", parse_mode="HTML")
+    await update.message.reply_text("📌 <b>ما هو القطاع ونموذج العمل الحالي؟</b>", parse_mode="HTML")
     return EXISTING_SECTOR
 
 
 async def existing_sector(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data["sector"] = update.message.text.strip()[:200]
-    await update.message.reply_text("📌 <b>ما التحدي أو هدف الفحص؟</b> (تراجع أرباح، تسعير، توسع)", parse_mode="HTML")
+    await update.message.reply_text("📌 <b>ما هو التحدي الرئيسي أو هدف التشخيص؟</b> (هوامش الربحية، سياسات التسعير، التوسع)", parse_mode="HTML")
     return EXISTING_CHALLENGE
 
 
 async def existing_challenge(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data["challenge"] = update.message.text.strip()[:300]
-    await update.message.reply_text("📎 ارفع القوائم المالية (PDF/Excel) الآن، أو اكتب «بدون ملفات».", parse_mode="HTML")
+    await update.message.reply_text("📎 يمكنك إرفاق القوائم المالية (PDF أو Excel) الآن، أو كتابة «بدون مرفقات».", parse_mode="HTML")
     return EXISTING_DOCS
 
 
@@ -441,29 +448,29 @@ async def existing_docs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     doc = update.message.document
     if doc:
         if (doc.file_size or 0) > config.MAX_UPLOAD_MB * 1024 * 1024:
-            await update.message.reply_text(f"⚠️ الملف أكبر من {config.MAX_UPLOAD_MB:g} ميغابايت.")
+            await update.message.reply_text(f"⚠️ حجم الملف يتجاوز الحد المسموح به ({config.MAX_UPLOAD_MB:g} ميغابايت).")
             return EXISTING_DOCS
-        await update.message.reply_text("⏳ جاري قراءة المستند واستخراج البيانات...")
+        await update.message.reply_text("⏳ جاري فحص المستند واستخراج البيانات المحاسبية...")
         try:
             tg_file = await context.bot.get_file(doc.file_id)
             raw = bytes(await tg_file.download_as_bytearray())
             text, pages = await parse_financial_document(raw, doc.file_name or "file")
             d.update(has_file=True, parsed_pages=pages, file_name=doc.file_name, extracted_chars=len(text))
             DOCS[update.effective_user.id] = text
-            msg = f"✅ تمت قراءة «{esc(doc.file_name)}» ({pages} صفحة/جدول)."
+            msg = f"✅ تمت قراءة الملف «{esc(doc.file_name)}» بنجاح ({pages} صفحة/جدول)."
         except DocParseError as exc:
             msg = f"⚠️ {esc(exc)}"
         except Exception:
-            logger.exception("doc parse")
-            msg = "⚠️ تعذّرت قراءة المستند."
+            logger.exception("doc parse error")
+            msg = "⚠️ تعذّرت قراءة المستند بالشكل المطلوب."
         await update.message.reply_text(msg, parse_mode="HTML")
     else:
-        await update.message.reply_text("تم المتابعة دون مرفقات.")
+        await update.message.reply_text("تمت المتابعة دون إرفاق ملفات.")
 
     await update.message.reply_text(
-        "🏛 <b>ملخص الطلب:</b>\n"
-        f"• الشركة: {esc(d['company_name'])}\n• القطاع: {esc(d['sector'])}\n• الهدف: {esc(d['challenge'])}\n"
-        f"• المرفقات: {'نعم' if d['has_file'] else 'لا'}\n\nهل أحفظ الطلب؟ (نعم / إلغاء)",
+        "🏛 <b>ملخص طلب التشخيص:</b>\n"
+        f"• المنشأة: {esc(d['company_name'])}\n• القطاع: {esc(d['sector'])}\n• الهدف: {esc(d['challenge'])}\n"
+        f"• المرفقات: {'مرفقة' if d['has_file'] else 'غير متوفرة'}\n\nهل ترغب في اعتماد وحفظ الطلب؟ (نعم / إلغاء)",
         parse_mode="HTML"
     )
     return EXISTING_CONFIRM
@@ -471,43 +478,42 @@ async def existing_docs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 
 async def existing_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if not is_yes(update.message.text):
-        await update.message.reply_text("تم الإلغاء. أرسل /start للبدء من جديد.")
+        await update.message.reply_text("تم إلغاء الطلب. يمكنك إرسال /start للبدء مجدداً.")
         return ConversationHandler.END
     d = context.user_data
     tracker = CostTracker("EXISTING_DIAGNOSTIC_REQUEST", update.effective_user.id)
     tracker.add_llama_pages(d.get("parsed_pages", 0))
-    tracker.stage("diagnostic_analysis", "skipped: الوحدة قيد التطوير")
+    tracker.stage("diagnostic_analysis", "skipped: قيد التطوير الميداني")
     await update.message.reply_text(
-        "📝 تم حفظ الطلب بنجاح. سنراجع البيانات ونتواصل معك بالتقرير التشخيصي المعتمد.",
+        "📝 تم تسجيل الطلب بنجاح. سيتم مراجعة البيانات وموافاتكم بتقرير الفحص التشخيصي المعتمد.",
         parse_mode="HTML"
     )
     await admin_notify(
         context.application,
-        f"📥 <b>طلب تشخيص شركة جديد</b>\n• {esc(d.get('company_name'))} | {esc(d.get('sector'))}\n"
-        f"• الهدف: {esc(d.get('challenge'))}\n• ملف: {esc(d.get('file_name', 'لا'))}"
+        f"📥 <b>طلب تشخيص منشأة جديد</b>\n• {esc(d.get('company_name'))} | {esc(d.get('sector'))}\n"
+        f"• الهدف: {esc(d.get('challenge'))}\n• المرفقات: {esc(d.get('file_name', 'بدون ملف'))}"
     )
     await finish_tracker(context.application, tracker)
     return ConversationHandler.END
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await update.message.reply_text("تم الإلغاء.", reply_markup=ReplyKeyboardRemove())
+    await update.message.reply_text("تم إلغاء الإجراء الحالي.", reply_markup=ReplyKeyboardRemove())
     return ConversationHandler.END
 
 
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    logger.error("خطأ غير معالج", exc_info=context.error)
+    logger.error("خطأ تشغيلي غير معالج", exc_info=context.error)
     await admin_notify(
         context.application, 
-        f"❗ خطأ في البوت: <code>{esc(type(context.error).__name__)}: {esc(str(context.error)[:300])}</code>"
+        f"❗ تنبيه تشغيلي: <code>{esc(type(context.error).__name__)}: {esc(str(context.error)[:300])}</code>"
     )
 
 
 async def post_init(app: Application) -> None:
-    # تهيئة جداول PostgreSQL تلقائياً عند إقلاع البوت
     init_db()
     if not config.ALLOWED_USER_IDS:
-        logger.warning("ALLOWED_USER_IDS غير مضبوط — البوت مغلق تلقائياً (Fail-Closed).")
+        logger.warning("ALLOWED_USER_IDS غير مضبوط — النظام مغلق تلقائياً (Fail-Closed).")
 
 
 def build_application() -> Application:
@@ -521,7 +527,10 @@ def build_application() -> Application:
     app = ApplicationBuilder().token(config.TELEGRAM_BOT_TOKEN).persistence(persistence).post_init(post_init).build()
 
     conv = ConversationHandler(
-        entry_points=[CommandHandler("start", start, filters=AUTH), CommandHandler("invoice", start_invoice_flow, filters=AUTH)],
+        entry_points=[
+            CommandHandler("start", start, filters=AUTH),
+            CommandHandler("invoice", start_invoice_flow, filters=AUTH)
+        ],
         states={
             CHOOSE_TRACK: [MessageHandler(TEXT, choose_track)],
             NEW_CONSULTATIVE_CHAT: [MessageHandler(TEXT, consultative_chat)],
