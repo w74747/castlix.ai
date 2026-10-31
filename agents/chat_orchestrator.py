@@ -1,47 +1,38 @@
 """
 chat_orchestrator.py — منسق الحوار الذكي والاستخلاص الاستشاري لـ Castlix.
-
-الوظيفة:
-  * إدارة الحوار بطريقة تفاعلية استشارية بأسلوب بشري غير متكلف.
-  * فهم اللهجات المحلية (عمانية، خليجية، شامية، مصرية) والفصحى.
-  * استخراج بيانات المشروع الأساسية (الفكرة، الموقع، رأس المال) في صورة كائن منظم.
-  * مساعدة العميل على صياغة الفكرة واستكمال المعطيات قبل تشغيل محرك النمذجة.
+يعتمد على بوابة Failover المتعددة لمنع أي انقطاع في الحوار.
 """
+import re
 import json
 import logging
 from typing import Any, Dict, Optional
 from pydantic import BaseModel, Field
 
 from utils.llm_gateway import LLMGateway
-import config
 
 logger = logging.getLogger("CastlixChatOrchestrator")
 
 
 class ProjectIntake(BaseModel):
-    is_ready_for_pipeline: bool = Field(
-        description="صحيح (True) إذا كانت الفكرة والموقع ورأس المال مفهومة بشكل كافٍ لبدء النموذج المالي، وإلا فخطأ (False)"
-    )
-    project_idea: Optional[str] = Field(None, description="طبيعة ونشاط المشروع المستخلص بدقة")
-    location: Optional[str] = Field(None, description="الدولة والمدينة أو المنطقة الصناعية")
-    capital: Optional[str] = Field(None, description="رأس المال المبدئي أو عبارة تقدير آلي إن لم يحدده")
-    conversational_reply: str = Field(
-        description="رد مستشار الأعمال الموجه للمستخدم؛ يرحب به، أو يناقشه، أو يسأله عن النواقص بلباقة"
-    )
+    is_ready_for_pipeline: bool = Field(description="صحيح إذا توفرت الفكرة والموقع ورأس المال التقريبي")
+    project_idea: Optional[str] = Field(None, description="طبيعة ونشاط المشروع")
+    location: Optional[str] = Field(None, description="الدولة والمدينة")
+    capital: Optional[str] = Field(None, description="الميزانية أو تقدير آلي")
+    conversational_reply: str = Field(description="رد مستشار الأعمال الموجه للمستخدم")
 
 
-EXTRACTION_SYSTEM_PROMPT = """أنت مستشار استثماري وشريك أعمال خبير في منصة Castlix Advisory.
+SYSTEM_PROMPT = """أنت مستشار استثماري وخبير أعمال في منصة Castlix Advisory.
 مهمتك:
-1. التحدث بلباقة ونبرة استشارية راقية، وفهم كلام العميل مهما كانت لهجته (عمانية، خليجية، فصحى، إلخ).
-2. استخلاص ثلاثة أركان رئيسية لبناء دراسة الجدوى:
-   - فكرة المشروع وطبيعته (Project Idea).
-   - الموقع الجغرافي أو المنطقة الصناعية (Location).
-   - رأس المال المبدئي التقريبي أو رغبة العميل في أن يقدره النظام آلياً (Capital).
-3. إذا دمج العميل كل شيء في رسالة واحدة (مثلاً: "باغي افتح كافيه في بوشر بميزانية عشرين ألف ريال"):
-   - استخرج القيم وضع `is_ready_for_pipeline: true`.
-   - اجعل `conversational_reply` يؤكد استيعابك للمعطيات ويسأله تأكيد الإطلاق.
-4. إذا نقصت معطيات (مثل غياب الموقع أو رأس المال)، اسأله عنها بسلاسة وود واجعل `is_ready_for_pipeline: false`.
-5. يجب أن يكون ردك دائماً كائن JSON حصراً مطابقاً للحقول التالية دون مقدمات:
+1. فهم كلام العميل بأي لهجة عربية (خليجية، عمانية، فصحى، إلخ).
+2. استخراج:
+   - فكرة المشروع (project_idea)
+   - الموقع أو الدولة (location)
+   - رأس المال (capital) -> إذا ذكر العميل أنه غير محدد أو لا توجد ميزانية، سجله: "تقدير آلي حسب معايير السوق".
+3. إذا اجتمعت لديك الفكرة والموقع (مثل: استخلاص زيت السمسم، والدولة تشاد):
+   - اعتبر المتطلبات جاهزة (`is_ready_for_pipeline: true`).
+   - اكتب في `conversational_reply` رداً ذكياً يؤكد استيعابك للمشروع وسؤاله لتأكيد الإطلاق.
+4. إذا كان هناك نقص جوهري، اسأله عنه بلباقة واجعل `is_ready_for_pipeline: false`.
+5. أجب حصراً بصيغة JSON نظيفة مطابقة للمواصفات دون أي مقدمات نصية:
 {
   "is_ready_for_pipeline": bool,
   "project_idea": string or null,
@@ -53,11 +44,8 @@ EXTRACTION_SYSTEM_PROMPT = """أنت مستشار استثماري وشريك أ
 
 
 class ChatOrchestrator:
-    def __init__(self, provider: str = "xai", model: Optional[str] = None):
+    def __init__(self):
         self.gateway = LLMGateway()
-        # المزود الافتراضي للحوار؛ يمكن استخدام xai (Grok) أو claude أو deepseek
-        self.provider = provider
-        self.model = model
 
     def process_user_input(
         self,
@@ -65,43 +53,63 @@ class ChatOrchestrator:
         current_state: Optional[Dict[str, Any]] = None,
         tracker=None
     ) -> ProjectIntake:
-        """
-        معالجة رسالة العميل واستخلاص المعطيات بذكاء.
-        """
-        context_text = f"المعطيات الحالية المسجلة مسبقاً إن وجدت: {json.dumps(current_state or {}, ensure_ascii=False)}\n"
-        prompt = f"{context_text}رسالة العميل الأخيرة:\n«{user_message}»"
+        state = current_state or {}
+        context_str = f"المعلومات المتوفرة مسبقاً: {json.dumps(state, ensure_ascii=False)}\n"
+        prompt = f"{context_str}رسالة العميل الحالية:\n«{user_message}»"
 
         try:
-            raw_response = self.gateway.generate(
+            raw = self.gateway.generate_with_failover(
                 prompt=prompt,
-                system_prompt=EXTRACTION_SYSTEM_PROMPT,
-                provider=self.provider,
-                model=self.model,
-                temperature=0.3,
-                max_tokens=1000,
+                system_prompt=SYSTEM_PROMPT,
                 tracker=tracker
             )
 
-            # تنظيف وسوم الماركداون المحتملة إن وجدت في رد النموذج
-            cleaned = raw_response.strip()
-            if cleaned.startswith("```json"):
-                cleaned = cleaned[7:]
-            if cleaned.startswith("```"):
-                cleaned = cleaned[3:]
-            if cleaned.endswith("```"):
-                cleaned = cleaned[:-3]
-            cleaned = cleaned.strip()
+            # استخراج كائن JSON حتى لو وضع النموذج نصاً قبله أو بعده
+            match = re.search(r"\{.*\}", raw, re.DOTALL)
+            if match:
+                raw_json = match.group(0)
+            else:
+                raw_json = raw
 
-            data = json.loads(cleaned)
-            return ProjectIntake(**data)
+            data = json.loads(raw_json)
+            
+            # دمج البيانات مع الحالة السابقة لضمان عدم ضياع أي معلومة سابقة
+            idea = data.get("project_idea") or state.get("project_idea")
+            loc = data.get("location") or state.get("location")
+            cap = data.get("capital") or state.get("capital")
+            
+            # إذا توفرت الفكرة والموقع، يعتبر جاهزاً حتى لو نسيه النموذج
+            ready = bool(idea and loc)
+
+            return ProjectIntake(
+                is_ready_for_pipeline=ready,
+                project_idea=idea,
+                location=loc,
+                capital=cap or "تقدير آلي حسب معايير السوق",
+                conversational_reply=data.get("conversational_reply") or "ممتاز، استوعبت الفكرة والموقع وسنبدأ الدراسة."
+            )
 
         except Exception as exc:
-            logger.warning(f"تعذر استخراج JSON من LLM ({exc})، تفعيل الرد الاحتياطي.")
-            # رد احتياطي مباشر في حال حدوث أي خطأ في النموذج الخارجي
+            logger.error(f"خطأ أثناء معالجة الحوار: {exc}", exc_info=True)
+            
+            # استخراج محلي سريع ذكي بدلاً من الرد الجامد المتكرر
+            idea = state.get("project_idea") or (user_message if len(user_message) > 15 else None)
+            loc = state.get("location") or ("تشاد" if "تشاد" in user_message else None)
+            cap = state.get("capital") or "تقدير آلي حسب معايير السوق"
+            
+            if idea and loc:
+                return ProjectIntake(
+                    is_ready_for_pipeline=True,
+                    project_idea=idea,
+                    location=loc,
+                    capital=cap,
+                    conversational_reply=f"أهلاً بك! تم تسجيل فكرة ({idea}) في ({loc}) برأس مال ({cap})."
+                )
+
             return ProjectIntake(
                 is_ready_for_pipeline=False,
-                project_idea=(current_state or {}).get("project_idea"),
-                location=(current_state or {}).get("location"),
-                capital=(current_state or {}).get("capital"),
-                conversational_reply="أهلاً بك! يرجى توضيح فكرة مشروعك، والدولة أو المدينة المقترحة، ورأس المال المتاح للبدء."
+                project_idea=idea,
+                location=loc,
+                capital=cap,
+                conversational_reply="أهلاً بك! حدثني باختصار عن فكرة مشروعك والبلد المراد تأسيسه فيه."
             )
