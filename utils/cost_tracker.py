@@ -9,7 +9,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import config
 from database import CostLog, SessionLocal
@@ -33,9 +33,10 @@ class CostTracker:
     started: float = field(default_factory=time.time)
 
     # ---- تسجيل الاستهلاك ----
-    def add_tavily(self, credits: float = 1.0) -> None:
-        self.tavily_calls += 1
-        self.tavily_credits += credits
+    def add_tavily(self, credits: float = 1.0, calls: int = 1, **kwargs) -> None:
+        """تسجيل استدعاءات وكريدتس Tavily مع دعم كافة المعاملات المحتملة."""
+        self.tavily_calls += int(calls)
+        self.tavily_credits += float(credits)
 
     def add_perplexity(self, calls: int = 1) -> None:
         self.perplexity_calls += calls
@@ -51,7 +52,7 @@ class CostTracker:
         self.llm_out += int(tokens_out)
 
     def add_tokens(self, total_tokens: int) -> None:
-        # تسجيل إجمالي التوكنز في حال لم يحدد المزود المدخلات والمخرجات منفصلين
+        """تسجيل إجمالي التوكنز المباشر لنماذج مثل DeepSeek و Grok و Claude."""
         self.llm_in += int(total_tokens)
 
     def stage(self, name: str, status: str) -> None:
@@ -74,7 +75,7 @@ class CostTracker:
     def total_usd(self) -> float:
         return round(sum(self.breakdown_usd().values()), 4)
 
-    # ---- إعداد تقرير HTML للمدير ----
+    # ---- إعداد تقرير HTML ----
     def report_html(self) -> str:
         total = self.total_usd()
         omr = round(total * config.USD_TO_OMR, 4)
@@ -130,7 +131,7 @@ class CostTracker:
                 if db:
                     db.close()
 
-        # 2. الحفظ في الملف المحلي كنسخة احتياطية
+        # 2. الحفظ في الملف المحلي الاحتياطي
         try:
             os.makedirs(os.path.dirname(config.COST_LOG_PATH) or ".", exist_ok=True)
             rec = {
