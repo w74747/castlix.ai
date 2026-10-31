@@ -1,10 +1,12 @@
 """
-bot.py — بوت Castlix Advisory على تليجرام (نسخة الذكاء الاستشاري والفواتير).
+bot.py — بوت Castlix Advisory على تليجرام (نسخة PostgreSQL و Redis المتكاملة).
 
-الميزات المضافة:
-  * منسق حوار ذكي (ChatOrchestrator) يفهم اللهجات ويدير الاستكشاف بأسلوب إنساني.
-  * نظام توليد عروض أسعار وفواتير رسمية PDF عبر أمر /invoice.
-  * استمرارية كاملة، أمان Fail-Closed، ومهام خلفية غير حاجبة.
+الميزات المحدثة:
+  * تهيئة تلقائية لجداول PostgreSQL عند الإقلاع.
+  * إدارة أقفال الجلسات والمهام الثقيلة عبر Redis (مع دعم التراجع التلقائي).
+  * حفظ تفاصيل المشاريع ومؤشراتها المالية ومسح السوق في جدول projects.
+  * حفظ الفواتير وعروض الأسعار الرسمية في جدول invoices.
+  * استمرارية تامة وأمان Fail-Closed مع معالجة غير حاجبة.
 """
 import asyncio
 import logging
@@ -31,6 +33,8 @@ from agents.chat_orchestrator import ChatOrchestrator
 from agents.finance import FinancialModelingAgent
 from agents.market import MarketResearchAgent
 from agents.presentation import PresentationAgent
+from database import Project, InvoiceRecord, SessionLocal, init_db
+from redis_cache import cache
 from utils.cost_tracker import CostTracker
 from utils.doc_parser import DocParseError, parse_financial_document
 from utils.invoice_generator import InvoiceGenerator
@@ -54,12 +58,10 @@ logger = logging.getLogger("CastlixEngine")
     INVOICE_DETAILS,
 ) = range(9)
 
-# فلتر الصلاحية: تفشل مغلقة تلقائياً لحماية النظام
 AUTH = filters.User(user_id=list(config.ALLOWED_USER_IDS))
 TEXT = filters.TEXT & ~filters.COMMAND & AUTH
 YES = ("نعم", "yes", "y", "ok", "تأكيد", "ابدأ", "توكل على الله", "تمام")
 
-RUNNING: set = set()
 DOCS: Dict[int, str] = {}
 orchestrator = ChatOrchestrator()
 invoice_gen = InvoiceGenerator()
@@ -148,7 +150,6 @@ async def consultative_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     user_msg = update.message.text.strip()
     tracker = CostTracker("AI_INTAKE", update.effective_user.id)
     
-    # استخلاص المعطيات عبر النموذج اللغوي دون تجميد البوت
     intake = await asyncio.to_thread(
         orchestrator.process_user_input,
         user_msg,
@@ -163,7 +164,9 @@ async def consultative_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if intake.capital:
         context.user_data["capital"] = intake.capital
 
-    # إذا اكتملت المعطيات الأساسية الثلاثة، نطلب التأكيد للإطلاق
+    # حفظ حالة الجلسة مؤقتاً في Redis
+    cache.set_session(update.effective_user.id, context.user_data)
+
     if intake.is_ready_for_pipeline and context.user_data.get("project_idea") and context.user_data.get("location"):
         d = context.user_data
         capital_disp = d.get("capital") or "تقدير آلي حسب معايير السوق"
@@ -178,7 +181,6 @@ async def consultative_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         )
         return NEW_CONFIRM
 
-    # في حال وجود نواقص، يتابع الحوار بأسلوب إنساني ذكي
     await update.message.reply_text(esc(intake.conversational_reply), parse_mode="HTML")
     return NEW_CONSULTATIVE_CHAT
 
@@ -192,11 +194,12 @@ async def new_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         return NEW_CONSULTATIVE_CHAT
 
     uid = update.effective_user.id
-    if uid in RUNNING:
+    
+    # محاولة اكتساب قفل تنفيذي عبر Redis
+    if not cache.acquire_lock(uid, timeout_seconds=300):
         await update.message.reply_text("⏳ لديك دراسة قيد الإعداد بالفعل. انتظر اكتمالها.")
         return ConversationHandler.END
 
-    RUNNING.add(uid)
     await update.message.reply_text("⏳ بدأ محرك Castlix العمل في الخلفية. سأرسل لك المخرجات مرحلياً فور جاهزيتها.")
     data = dict(context.user_data)
     context.application.create_task(run_new_project(context.application, update.effective_chat.id, uid, data))
@@ -204,10 +207,14 @@ async def new_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
 
 
 async def run_new_project(app: Application, chat_id: int, user_id: int, data: Dict[str, Any]) -> None:
-    """المسار الكامل غير الحاجب لتحليل السوق وبناء الإكسيل وتوليد الشرائح."""
+    """المسار الكامل لتحليل السوق وبناء الإكسيل والشرائح وحفظ النتائج في PostgreSQL."""
     tracker = CostTracker("NEW_FEASIBILITY", user_id)
     bot = app.bot
     market_html = ""
+    fin = None
+    deck_url = None
+    project_status = "completed"
+
     try:
         # 1. مسح السوق (Tavily)
         if config.TAVILY_API_KEY:
@@ -215,7 +222,7 @@ async def run_new_project(app: Application, chat_id: int, user_id: int, data: Di
             try:
                 agent = MarketResearchAgent()
                 market = await asyncio.to_thread(agent.conduct_research, data["project_idea"], data["location"], tracker)
-                market_html = market.get("structured_report", "")
+                market_html = market.get("report_html", "")
                 tracker.stage("market", "ok")
                 await safe_send(bot, chat_id, market_html)
             except Exception as exc:
@@ -227,7 +234,6 @@ async def run_new_project(app: Application, chat_id: int, user_id: int, data: Di
 
         # 2. النموذج المالي التفاعلي (openpyxl + finance_core)
         await safe_send(bot, chat_id, "📐 جاري بناء النموذج المالي والسيناريوهات الحسابية...")
-        fin = None
         try:
             fin = await asyncio.to_thread(
                 FinancialModelingAgent().generate_financial_model,
@@ -257,6 +263,7 @@ async def run_new_project(app: Application, chat_id: int, user_id: int, data: Di
         except Exception as exc:
             logger.exception("finance error")
             tracker.stage("finance", f"failed: {type(exc).__name__}")
+            project_status = "failed"
             await safe_send(bot, chat_id, "❌ تعذّر بناء النموذج المالي. تم إشعار الإدارة.")
 
         # 3. العرض التقديمي (Gamma API v1.0)
@@ -275,9 +282,10 @@ async def run_new_project(app: Application, chat_id: int, user_id: int, data: Di
                     tracker
                 )
                 if deck and deck.get("url"):
+                    deck_url = deck.get("url")
                     tracker.stage("presentation", "ok")
                     extra = f"\n📥 تصدير: {esc(deck['export_url'])}" if deck.get("export_url") else ""
-                    await safe_send(bot, chat_id, f"🎯 العرض الاستثماري جاهز:\n{esc(deck['url'])}{extra}")
+                    await safe_send(bot, chat_id, f"🎯 العرض الاستثماري جاهز:\n{esc(deck_url)}{extra}")
                 else:
                     tracker.stage("presentation", "failed")
                     await safe_send(bot, chat_id, "⚠️ لم يكتمل بناء العرض التقديمي.")
@@ -287,9 +295,36 @@ async def run_new_project(app: Application, chat_id: int, user_id: int, data: Di
         else:
             tracker.stage("presentation", "skipped")
 
+        # 4. حفظ سجل المشروع في PostgreSQL
+        if SessionLocal:
+            db = None
+            try:
+                db = SessionLocal()
+                p_record = Project(
+                    user_id=user_id,
+                    project_idea=data.get("project_idea", ""),
+                    location=data.get("location", ""),
+                    capital_text=data.get("capital", ""),
+                    capital_usd=fin.capital_usd if fin else None,
+                    status=project_status,
+                    market_summary=market_html[:2000] if market_html else None,
+                    finance_metrics=fin.metrics if fin else None,
+                    deck_url=deck_url
+                )
+                db.add(p_record)
+                db.commit()
+                logger.info("تم حفظ بيانات دراسة الجدوى في جدول projects بـ PostgreSQL.")
+            except Exception as exc:
+                logger.error(f"فشل حفظ المشروع في قاعدة البيانات: {exc}")
+                if db:
+                    db.rollback()
+            finally:
+                if db:
+                    db.close()
+
         await safe_send(bot, chat_id, "✅ اكتملت مخرجات الدراسة الاستثمارية الأولية بنجاح.")
     finally:
-        RUNNING.discard(user_id)
+        cache.release_lock(user_id)
         await finish_tracker(app, tracker)
 
 
@@ -347,6 +382,31 @@ async def handle_invoice_details(update: Update, context: ContextTypes.DEFAULT_T
         currency=currency,
         notes="الدفع مستحق خلال 14 يوماً من تاريخ الإصدار عبر التحويل البنكي المباشر."
     )
+
+    # حفظ سجل الفاتورة في جدول invoices بـ PostgreSQL
+    if SessionLocal:
+        db = None
+        try:
+            db = SessionLocal()
+            inv_record = InvoiceRecord(
+                doc_number=doc_number,
+                doc_type=doc_type,
+                client_name=client_name,
+                client_org=client_org,
+                amount=rate,
+                currency=currency,
+                status="issued"
+            )
+            db.add(inv_record)
+            db.commit()
+            logger.info("تم حفظ الفاتورة في جدول invoices بـ PostgreSQL.")
+        except Exception as exc:
+            logger.error(f"فشل حفظ الفاتورة في قاعدة البيانات: {exc}")
+            if db:
+                db.rollback()
+        finally:
+            if db:
+                db.close()
 
     buf = BytesIO(pdf_bytes)
     buf.name = f"{doc_type}_{doc_number}.pdf"
@@ -444,6 +504,8 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def post_init(app: Application) -> None:
+    # تهيئة جداول PostgreSQL تلقائياً عند إقلاع البوت
+    init_db()
     if not config.ALLOWED_USER_IDS:
         logger.warning("ALLOWED_USER_IDS غير مضبوط — البوت مغلق تلقائياً (Fail-Closed).")
 
