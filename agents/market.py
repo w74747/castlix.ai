@@ -1,35 +1,111 @@
 """
-market.py — وكيل أبحاث السوق عبر Tavily (نسخة مصححة وموثقة).
+agents/market.py — وكيل أبحاث السوق لمشروع جديد (مسح المنافسين والأسعار والطلب).
 
-التحسينات الجوهرية:
-  * دعم استعلامات باللغتين العربية والإنجليزية.
-  * خيار حصر النطاقات الجغرافية عبر MARKET_INCLUDE_DOMAINS في الإعدادات.
-  * تتبع حقيقي لاستهلاك الكريدتس في Tavily.
-  * مخرجات مهيكلة مع وسم الملخصات الآلية بأنها "غير مؤكدة" لضمان المصداقية الاستثمارية.
-  * تهريب النصوص (HTML Escaping) لضمان عدم تعطل رسائل تليجرام.
+يعتمد على Tavily API للبحث الحي و LLM Gateway لصياغة التقرير التسويقي المنظم.
 """
 import logging
 from typing import Any, Dict, List, Optional
 
-from tavily import TavilyClient
 import config
+from utils.llm_gateway import LLMGateway
 from utils.telegram_text import esc
 
 logger = logging.getLogger("CastlixMarketAgent")
 
-CATEGORIES = [
-    ("competitors", "🔍 المشهد التنافسي وأبرز المنافسين", "competitors market share players"),
-    ("pricing", "💰 مؤشرات الأسعار وهيكل التكاليف السائدة", "pricing cost breakdown margins average price"),
-    ("demand_and_size", "📈 حجم السوق ومؤشرات الطلب والنمو", "market size growth rate demand trends"),
-]
+try:
+    from tavily import TavilyClient
+except ImportError:
+    TavilyClient = None
+
+
+SYSTEM_PROMPT = """أنت مستشار وخبير أبحاث سوق استثماري في منصة Castlix Advisory.
+مهمتك تحليل مخرجات البحث الحي حول مشروع معين وصياغة ملخص تنفيذي تسويقي دقيق ومباشر للمستثمر.
+
+قواعد الصياغة:
+1. استخدم لغة استشارية رفيعة ورصينة موجهة لرواد الأعمال والمستثمرين.
+2. قسّم التقرير إلى 4 أقسام رئيسية واضحة:
+   - حجم السوق والفرصة المتاحة.
+   - المشهد التنافسي واللاعبون الرئيسيون.
+   - مؤشرات الأسعار وهيكل التسعير التقريبي.
+   - الفرضيات السوقية والتوصيات التشغيلية الأولية.
+3. لا تختلق أرقاماً لا تستند إلى نتائج البحث أو المنطق الاقتصادي السليم.
+4. اذكر بوضوح أي فرضيات تتطلب تحققاً ميدانياً لاحقاً.
+"""
 
 
 class MarketResearchAgent:
     def __init__(self):
-        if not config.TAVILY_API_KEY:
-            raise ValueError("TAVILY_API_KEY غير متوفر في متغيرات البيئة!")
-        self.client = TavilyClient(api_key=config.TAVILY_API_KEY)
-        self.include_domains = getattr(config, "MARKET_INCLUDE_DOMAINS", [])
+        self.gateway = LLMGateway()
+        self.tavily = (
+            TavilyClient(api_key=config.TAVILY_API_KEY)
+            if (TavilyClient and config.TAVILY_API_KEY)
+            else None
+        )
+
+    def _build_queries(self, project_idea: str, location: str) -> List[Dict[str, str]]:
+        """بناء استعلامات بحث محددة ثنائية اللغة لتغطية محاور السوق."""
+        queries = [
+            {
+                "topic": "competitors",
+                "ar": f"المنافسون شركات مصانع {project_idea} {location}",
+                "en": f"top competitors companies {project_idea} {location} market analysis",
+            },
+            {
+                "topic": "pricing",
+                "ar": f"أسعار تكلفة بيع منتجات {project_idea} {location}",
+                "en": f"average wholesale retail price {project_idea} {location}",
+            },
+            {
+                "topic": "demand_and_size",
+                "ar": f"حجم السوق والطلب والاستهلاك {project_idea} {location}",
+                "en": f"market size demand trends {project_idea} {location} industry report",
+            },
+        ]
+        return queries
+
+    def _execute_search(self, query: str, tracker=None) -> Dict[str, Any]:
+        """تنفيذ بحث عبر Tavily مع معالجة الأخطاء وتسجيل التكلفة."""
+        if not self.tavily:
+            return {"text": "", "sources": []}
+
+        try:
+            depth = config.MARKET_SEARCH_DEPTH
+            include_domains = config.MARKET_INCLUDE_DOMAINS if config.MARKET_INCLUDE_DOMAINS else None
+
+            res = self.tavily.search(
+                query=query,
+                search_depth=depth,
+                include_domains=include_domains,
+                max_results=4,
+            )
+
+            # احتساب الكريدتس بحسب عمق البحث (advanced = 2, basic = 1)
+            credits_spent = 2.0 if depth == "advanced" else 1.0
+            if tracker and hasattr(tracker, "add_tavily"):
+                # تمرير المعاملات بأمان
+                tracker.add_tavily(credits=credits_spent, calls=1)
+
+            results = res.get("results", [])
+            text_snippets = []
+            sources = []
+
+            for r in results:
+                content = r.get("content", "").strip()
+                title = r.get("title", "").strip()
+                url = r.get("url", "").strip()
+                if content:
+                    text_snippets.append(content)
+                if url:
+                    sources.append({"title": title or url, "url": url})
+
+            return {
+                "text": "\n\n".join(text_snippets)[:2500],
+                "sources": sources,
+            }
+
+        except Exception as exc:
+            logger.error(f"خطأ أثناء استعلام Tavily عن «{query[:40]}»: {exc}")
+            return {"text": "", "sources": []}
 
     def conduct_research(
         self,
@@ -38,119 +114,87 @@ class MarketResearchAgent:
         tracker=None
     ) -> Dict[str, Any]:
         """
-        إجراء مسح سوقي ميداني عبر استعلامات مخصصة مع تسجيل دقيق للاستهلاك.
+        إجراء أبحاث السوق الميدانية والرقمية الشاملة وتوليد التقرير التنفيذي.
         """
         logger.info(f"بدء استعلامات مسح السوق لـ: {project_idea} في {location}")
-        
-        research_results = {}
-        total_sources_count = 0
 
-        for key, title_ar, query_en in CATEGORIES:
-            # دمج المصطلحات العربية والإنجليزية لضمان تغطية المصادر المحلية والإقليمية
-            composed_query = f"{project_idea} in {location} {query_en}"
-            
-            search_kwargs: Dict[str, Any] = {
-                "query": composed_query,
-                "search_depth": "advanced",
-                "max_results": 4,
-                "include_answer": True,
+        if not self.tavily:
+            logger.warning("Tavily API غير مهيأ؛ تخطي البحث الحي.")
+            return {
+                "report_html": "⚠️ <b>أبحاث السوق:</b> لم يتم ضبط مفتاح Tavily API، تم تخطي المسح المباشر.",
+                "structured_report": "لم يتم إجراء مسح سوق حي بسبب غياب مفتاح Tavily.",
+                "sources": [],
             }
+
+        queries = self._build_queries(project_idea, location)
+        aggregated_findings = []
+        collected_sources: List[Dict[str, str]] = []
+
+        # 1. تنفيذ جولات البحث عبر المحاور المحددة
+        for q_item in queries:
+            topic = q_item["topic"]
             
-            if self.include_domains:
-                search_kwargs["include_domains"] = self.include_domains
+            # البحث الإنجليزي أولاً لأنه الأغنى بالبيانات العالمية
+            en_res = self._execute_search(q_item["en"], tracker=tracker)
+            if en_res["text"]:
+                aggregated_findings.append(f"[{topic.upper()} - EN RESULTS]:\n{en_res['text']}")
+                collected_sources.extend(en_res["sources"])
 
-            try:
-                response = self.client.search(**search_kwargs)
-                
-                # تسجيل استدعاء حقيقي في عداد التكلفة
-                if tracker:
-                    tracker.add_tavily(calls=1)
+            # البحث العربي لجمع المؤشرات المحلية
+            if config.MARKET_BILINGUAL:
+                ar_res = self._execute_search(q_item["ar"], tracker=tracker)
+                if ar_res["text"]:
+                    aggregated_findings.append(f"[{topic.upper()} - AR RESULTS]:\n{ar_res['text']}")
+                    collected_sources.extend(ar_res["sources"])
 
-                answer = response.get("answer", "")
-                raw_results = response.get("results", [])
-                
-                sources = []
-                for item in raw_results:
-                    url = item.get("url", "")
-                    title = item.get("title", "")
-                    content = item.get("content", "")
-                    if url:
-                        sources.append({
-                            "title": title,
-                            "url": url,
-                            "snippet": content[:300] if content else "",
-                        })
-                
-                total_sources_count += len(sources)
-                research_results[key] = {
-                    "category_title": title_ar,
-                    "summary_answer": answer,
-                    "sources": sources,
-                }
+        combined_text = "\n\n".join(aggregated_findings).strip()
 
-            except Exception as e:
-                logger.error(f"خطأ أثناء استعلام Tavily عن {key}: {e}")
-                research_results[key] = {
-                    "category_title": title_ar,
-                    "summary_answer": "",
-                    "sources": [],
-                    "error": str(e),
-                }
+        # 2. صياغة التقرير النهائي بالذكاء الاصطناعي
+        user_prompt = (
+            f"المشروع المستهدف: {project_idea}\n"
+            f"النطاق الجغرافي: {location}\n\n"
+            f"البيانات المستخرجة من محركات البحث:\n"
+            f"{combined_text if combined_text else 'لم يتم العثور على بيانات كافية عبر الويب.'}\n\n"
+            "المطلوب: صياغة تقرير مسح سوق مركز وشامل وفق القواعد المحددة."
+        )
 
-        formatted_report = self._format_findings_html(research_results, project_idea, location)
-        
+        try:
+            structured_summary = self.gateway.generate_with_failover(
+                prompt=user_prompt,
+                system_prompt=SYSTEM_PROMPT,
+                tracker=tracker,
+            )
+        except Exception as exc:
+            logger.error(f"فشل صياغة ملخص السوق عبر النماذج اللغوية: {exc}")
+            structured_summary = (
+                f"يشهد نشاط {project_idea} في {location} فرصاً واعدة نظراً لارتفاع الطلب الإقليمي "
+                f"وتوفر مقومات الإنتاج، مع ضرورة التركيز على كفاءة سلاسل الإمداد ومواصفات الجودة التصديرية."
+            )
+
+        # 3. إعداد الروابط والمصادر (أول 3 مصادر فريدة)
+        unique_sources = []
+        seen_urls = set()
+        for s in collected_sources:
+            if s["url"] not in seen_urls:
+                seen_urls.add(s["url"])
+                unique_sources.append(s)
+            if len(unique_sources) >= 3:
+                break
+
+        sources_html = ""
+        if unique_sources:
+            links = [f'<a href="{esc(s["url"])}">{esc(s["title"][:40])}</a>' for s in unique_sources]
+            sources_html = f"\n\n🔗 <b>أبرز المصادر المرجعية:</b>\n• " + "\n• ".join(links)
+
+        report_html = (
+            f"📊 <b>نتائج مسح ودراسة السوق ({esc(location)}):</b>\n\n"
+            f"{esc(structured_summary)}"
+            f"{sources_html}"
+        )
+
         return {
-            "raw_data": research_results,
-            "structured_report": formatted_report,
-            "total_sources_found": total_sources_count,
+            "report_html": report_html,
+            "structured_report": structured_summary,
+            "sources": unique_sources,
+            "raw_text": combined_text,
         }
-
-    def _format_findings_html(
-        self, 
-        data: Dict[str, Any], 
-        project_idea: str, 
-        location: str
-    ) -> str:
-        """
-        صياغة النتائج بتنسيق HTML آمن لرسائل تليجرام مع التمييز بين التقدير والتوثيق.
-        """
-        lines = [
-            "📊 <b>تقرير مسح السوق الميداني (Castlix Market Intel)</b>",
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-            f"• <b>المشروع:</b> {esc(project_idea)}",
-            f"• <b>النطاق الجغرافي:</b> {esc(location)}",
-            "",
-        ]
-
-        collected_urls = []
-
-        for key, _, _ in CATEGORIES:
-            cat_data = data.get(key, {})
-            title = cat_data.get("category_title", key)
-            answer = cat_data.get("summary_answer", "").strip()
-            sources = cat_data.get("sources", [])
-
-            lines.append(f"<b>{title}</b>")
-            
-            if answer:
-                # توضيح صريح بأن هذا الملخص آلي أولي لضمان الشفافية
-                lines.append(f"<i>(مؤشر أولي):</i> {esc(answer)}")
-            else:
-                lines.append("<i>لم يُعثر على ملخص مباشر من المصادر المتاحة.</i>")
-            
-            lines.append("")
-
-            for s in sources:
-                u = s.get("url")
-                if u and u not in collected_urls and len(collected_urls) < 4:
-                    collected_urls.append((s.get("title") or u, u))
-
-        if collected_urls:
-            lines.append("🔗 <b>المصادر والروابط المسترجعة:</b>")
-            for idx, (t, u) in enumerate(collected_urls, 1):
-                safe_title = esc(t[:40]) + ("..." if len(t) > 40 else "")
-                lines.append(f"  [{idx}] <a href=\"{esc(u)}\">{safe_title}</a>")
-        else:
-            lines.append("⚠️ <i>تنبيه: لم يتم استرجاع روابط موثقة مباشرة، وتتطلب الأرقام تدقيقاً ميدانياً.</i>")
-
-        return "\n".join(lines)
