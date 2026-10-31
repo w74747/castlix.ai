@@ -2,12 +2,13 @@
 bot.py — بوت Castlix Advisory على تليجرام (النسخة الاستشارية والمؤسسية المحدثة).
 
 الميزات المدمجة:
-  * واجهة ترحيبية رصينة بأسلوب بيوت الخبرة والاستشارات العالمية.
+  * واجهة تترحيبية رصينة بأسلوب بيوت الخبرة والاستشارات العالمية.
   * منسق حوار ذكي (ChatOrchestrator) يفهم اللهجات ويدعم التبديل التلقائي بين النماذج (Auto-Failover).
   * تكامل دائم مع PostgreSQL لحفظ المشاريع، الفواتير، وسجلات التكاليف.
   * إدارة الجلسات والأقفال التشغيلية اللحظية عبر Redis.
   * توليد عروض أسعار وفواتير رسمية بصيغة PDF بالهوية المعتمدة عبر أمر /invoice.
   * أمان صارم (Fail-Closed) ومعالجة غير حاجبة (Non-blocking Tasks).
+  * تصفية ذكية لأخطاء النشر (Conflict Error Filter) لمنع الرسائل المزعجة أثناء التحديث.
 """
 import asyncio
 import logging
@@ -17,6 +18,7 @@ from io import BytesIO
 from typing import Any, Dict
 
 from telegram import ReplyKeyboardMarkup, ReplyKeyboardRemove, Update
+from telegram.error import Conflict
 from telegram.ext import (
     Application,
     ApplicationBuilder,
@@ -502,8 +504,18 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     return ConversationHandler.END
 
 
+# -----------------------------------------------------------------------------
+# معالج الأخطاء المركزي مع تصفية أخطاء Conflict أثناء النشر
+# -----------------------------------------------------------------------------
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # 1. تجاهل خطأ التعارض الشائع عند تداخل الحاويات في مرحلة الـ Rolling Deployment
+    if isinstance(context.error, Conflict):
+        logger.warning("تم رصد Telegram Conflict (طبيعي ومؤقت أثناء تبديل الحاويات في Railway).")
+        return
+
     logger.error("خطأ تشغيلي غير معالج", exc_info=context.error)
+    
+    # 2. إرسال الأخطاء الحقيقية غير المعالجة فقط للمشرف
     await admin_notify(
         context.application, 
         f"❗ تنبيه تشغيلي: <code>{esc(type(context.error).__name__)}: {esc(str(context.error)[:300])}</code>"
