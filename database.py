@@ -2,7 +2,7 @@
 database.py — وحدة إدارة قاعدة بيانات PostgreSQL لمنصة Castlix Advisory.
 
 توفر هذه الوحدة:
-  - تهيئة الاتصال بـ PostgreSQL باستخدام SQLAlchemy.
+  - تهيئة الاتصال بـ PostgreSQL باستخدام SQLAlchemy ومشغل psycopg2-binary صراحةً.
   - تعريف الجداول الأساسية (المشاريع، التكاليف، الفواتير).
   - دوال مساعدة لإنشاء الجداول والتعامل مع الجلسات بأمان.
 """
@@ -29,9 +29,12 @@ logger = logging.getLogger("CastlixDatabase")
 # قراءة رابط قاعدة البيانات من متغيرات البيئة (Railway يدعم DATABASE_URL أو POSTGRES_URL)
 DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("POSTGRES_URL")
 
-# تعديل بادئة postgres:// إلى postgresql:// لتوافق أحدث إصدارات SQLAlchemy إن لزم
-if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+# تعديل بادئة الاتصال لاستخدام مشغل psycopg2-binary صراحةً لتجنب خطأ No module named 'psycopg'
+if DATABASE_URL:
+    if DATABASE_URL.startswith("postgres://"):
+        DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+psycopg2://", 1)
+    elif DATABASE_URL.startswith("postgresql://") and not DATABASE_URL.startswith("postgresql+"):
+        DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+psycopg2://", 1)
 
 Base = declarative_base()
 
